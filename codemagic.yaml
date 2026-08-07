@@ -69,7 +69,7 @@ workflows:
           # compileOptions and kotlinOptions to a compatible target (21 if available, otherwise 17).
           if [ -n "$APP_DIR" ] && [ "$APP_DIR" != "." ]; then ROOT_DIR="$APP_DIR"; else ROOT_DIR="."; fi
           echo "Applying Android compatibility fixes under: $ROOT_DIR"
-          python3 - <<'PY'
+          cat > /tmp/compat_patch.py <<'PY'
             import os
             import re
             import subprocess
@@ -135,6 +135,9 @@ workflows:
                             except Exception as e:
                                 print('Failed to write patch to', path, e)
           PY
+          # remove leading indentation added by YAML so python file starts at column 1
+          sed -i '' -e "s/^    //" /tmp/compat_patch.py || sed -i -e "s/^    //" /tmp/compat_patch.py
+          python3 /tmp/compat_patch.py
           echo "Android compatibility fixes complete. Listing modified gradle files (if any):"
           find "$ROOT_DIR" -type f \( -name 'build.gradle' -o -name 'build.gradle.kts' \) -maxdepth 6 -print
 
