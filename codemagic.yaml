@@ -70,53 +70,73 @@ workflows:
           if [ -n "$APP_DIR" ] && [ "$APP_DIR" != "." ]; then ROOT_DIR="$APP_DIR"; else ROOT_DIR="."; fi
           echo "Applying Android compatibility fixes under: $ROOT_DIR"
           python3 - <<'PY'
-import os, re, subprocess
-root_dir = os.environ.get('ROOT_DIR','.')
-# detect java major version
-java_version = None
-try:
-    p = subprocess.run(['java','-version'], stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-    s = p.stderr + p.stdout
-    m = re.search(r'version "?([0-9]+)', s)
-    if m:
-        java_version = int(m.group(1))
-except Exception as e:
-    print('Warning: could not determine java version:', e)
-# choose target version
-if java_version and java_version >= 21:
-    target = 21
-else:
-    target = 17
-java_const = f'VERSION_{target}'
-print(f'Detected java_version={java_version}, using target={target}')
-# walk and patch gradle files
-for dirpath, dirnames, filenames in os.walk(root_dir):
-    for fname in filenames:
-        if fname == 'build.gradle' or fname.endswith('.gradle.kts') or fname == 'build.gradle.kts':
-            path = os.path.join(dirpath, fname)
+            import os
+            import re
+            import subprocess
+
+            root_dir = os.environ.get('ROOT_DIR', '.')
+
+            # detect java major version
+            java_version = None
             try:
-                txt = open(path, 'r', encoding='utf-8').read()
-            except Exception:
-                print('Skipping non-text file', path)
-                continue
-            modified = txt
-            if 'android {' in txt:
-                # replace existing JavaVersion.VERSION_X or numeric versions
-                modified = re.sub(r'sourceCompatibility\s+JavaVersion\.VERSION_\d+', 'sourceCompatibility JavaVersion.' + java_const, modified)
-                modified = re.sub(r'targetCompatibility\s+JavaVersion\.VERSION_\d+', 'targetCompatibility JavaVersion.' + java_const, modified)
-                modified = re.sub(r'sourceCompatibility\s*=\s*\"?\d+\"?', 'sourceCompatibility JavaVersion.' + java_const, modified)
-                modified = re.sub(r'targetCompatibility\s*=\s*\"?\d+\"?', 'targetCompatibility JavaVersion.' + java_const, modified)
-                # kotlin jvmTarget
-                modified = re.sub(r'jvmTarget\s*=\s*\"?\d+\"?', 'jvmTarget = "' + str(target) + '"', modified)
-                # if neither compileOptions nor kotlinOptions exist, insert them after android {
-                if 'compileOptions' not in modified and 'kotlinOptions' not in modified:
-                    modified = modified.replace('android {', 'android {\n    compileOptions {\n        sourceCompatibility JavaVersion.' + java_const + '\n        targetCompatibility JavaVersion.' + java_const + '\n    }\n    kotlinOptions {\n        jvmTarget = "' + str(target) + '"\n    }\n', 1)
-            if modified != txt:
-                open(path, 'w', encoding='utf-8').write(modified)
-                print('Patched', path)
-PY
+                p = subprocess.run(['java', '-version'], stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                s = p.stderr + p.stdout
+                m = re.search(r'version \"?([0-9]+)', s)
+                if m:
+                    java_version = int(m.group(1))
+            except Exception as e:
+                print('Warning: could not determine java version:', e)
+
+            # choose target version
+            if java_version and java_version >= 21:
+                target = 21
+            else:
+                target = 17
+
+            java_const = f'VERSION_{target}'
+            print(f'Detected java_version={java_version}, using target={target}')
+
+            # walk and patch gradle files
+            for dirpath, dirnames, filenames in os.walk(root_dir):
+                for fname in filenames:
+                    if fname == 'build.gradle' or fname.endswith('.gradle.kts') or fname == 'build.gradle.kts':
+                        path = os.path.join(dirpath, fname)
+                        try:
+                            txt = open(path, 'r', encoding='utf-8').read()
+                        except Exception:
+                            print('Skipping non-text file', path)
+                            continue
+                        modified = txt
+                        if 'android {' in txt:
+                            # replace existing JavaVersion.VERSION_X or numeric versions
+                            modified = re.sub(r'sourceCompatibility\s+JavaVersion\.VERSION_\d+', 'sourceCompatibility JavaVersion.' + java_const, modified)
+                            modified = re.sub(r'targetCompatibility\s+JavaVersion\.VERSION_\d+', 'targetCompatibility JavaVersion.' + java_const, modified)
+                            modified = re.sub(r'sourceCompatibility\s*=\s*\"?\d+\"?', 'sourceCompatibility JavaVersion.' + java_const, modified)
+                            modified = re.sub(r'targetCompatibility\s*=\s*\"?\d+\"?', 'targetCompatibility JavaVersion.' + java_const, modified)
+                            # kotlin jvmTarget
+                            modified = re.sub(r'jvmTarget\s*=\s*\"?\d+\"?', 'jvmTarget = "' + str(target) + '"', modified)
+                            # if neither compileOptions nor kotlinOptions exist, insert them after android {
+                            if 'compileOptions' not in modified and 'kotlinOptions' not in modified:
+                                insert_block = (
+                                    'android {\n'
+                                    '    compileOptions {\n'
+                                    '        sourceCompatibility JavaVersion.' + java_const + '\n'
+                                    '        targetCompatibility JavaVersion.' + java_const + '\n'
+                                    '    }\n'
+                                    '    kotlinOptions {\n'
+                                    '        jvmTarget = "' + str(target) + '"\n'
+                                    '    }\n'
+                                    )
+                                modified = modified.replace('android {', insert_block, 1)
+                        if modified != txt:
+                            try:
+                                open(path, 'w', encoding='utf-8').write(modified)
+                                print('Patched', path)
+                            except Exception as e:
+                                print('Failed to write patch to', path, e)
+          PY
           echo "Android compatibility fixes complete. Listing modified gradle files (if any):"
-          find "$ROOT_DIR" -type f -name 'build.gradle' -o -name 'build.gradle.kts' -maxdepth 6 -print
+          find "$ROOT_DIR" -type f \( -name 'build.gradle' -o -name 'build.gradle.kts' \) -maxdepth 6 -print
 
       - name: Build Debug APK File
         script: |
