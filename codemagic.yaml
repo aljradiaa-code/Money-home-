@@ -10,26 +10,61 @@ workflows:
       - name: Extract app-source.zip if present
         script: |
           if [ -f "app-source.zip" ]; then
-            echo "Found app-source.zip, extracting contents cleanly with Python..."
+            echo "Found app-source.zip, extracting..."
             python3 -m zipfile -e app-source.zip .
+            echo "Extraction done. Listing top-level:"
+            ls -la
+            echo "Searching for package.json..."
+            if [ -f package.json ]; then
+              export APP_DIR="."
+            else
+              APP_DIR=$(find . -maxdepth 3 -name package.json -exec dirname {} \; | head -n 1 || true)
+              if [ -z "$APP_DIR" ]; then
+                echo "package.json not found after extraction" >&2
+              fi
+              export APP_DIR="$APP_DIR"
+            fi
+            echo "APP_DIR=$APP_DIR"
           fi
+
       - name: Install Dependencies
         script: |
-          npm ci || npm install
+          if [ -n "$APP_DIR" ] && [ "$APP_DIR" != "." ]; then cd "$APP_DIR"; fi
+          pwd
+          ls -la
+          if [ -f package.json ]; then
+            npm ci || npm install
+          else
+            echo "No package.json found; aborting install" >&2
+            exit 1
+          fi
+
       - name: Build Web Production Assets
         script: |
+          if [ -n "$APP_DIR" ] && [ "$APP_DIR" != "." ]; then cd "$APP_DIR"; fi
           npm run build
+
       - name: Setup Capacitor & Android Native Project
         script: |
+          if [ -n "$APP_DIR" ] && [ "$APP_DIR" != "." ]; then cd "$APP_DIR"; fi
           npm install @capacitor/core @capacitor/cli @capacitor/android
           if [ ! -d "android" ]; then
             npx cap add android
           fi
           npx cap sync android
+
       - name: Build Debug APK File
         script: |
-          cd android
+          if [ -n "$APP_DIR" ] && [ "$APP_DIR" != "." ]; then
+            cd "$APP_DIR/android" || cd android
+          else
+            cd android
+          fi
+          pwd
+          ls -la
+          chmod +x ./gradlew || true
           ./gradlew assembleDebug
+
     artifacts:
       - android/app/build/outputs/apk/debug/*.apk
       - dist/**/*
