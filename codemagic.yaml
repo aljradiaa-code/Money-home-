@@ -62,83 +62,65 @@ workflows:
           fi
           npx cap sync android || true
 
+      - name: Install Gradle init script to force Java/Kotlin compatibility
+        script: |
+          # create ~/.gradle/init.gradle to force compileOptions and kotlin jvmTarget across projects
+          mkdir -p ~/.gradle
+          echo "Installing init.gradle to ~/.gradle/init.gradle"
+          JAVA_VER=$(java -version 2>&1 | awk -F\" '/version/ {print $2}' | awk -F. '{print $1}') || true
+          if [ -z "$JAVA_VER" ]; then JAVA_VER=17; fi
+          if [ "$JAVA_VER" -ge 21 ]; then TARGET=21; else TARGET=17; fi
+          cat > ~/.gradle/init.gradle <<'INIT'
+allprojects {
+    gradle.projectsEvaluated {
+        rootProject.allprojects.each { project ->
+            if (project.plugins.hasPlugin('com.android.application') || project.plugins.hasPlugin('com.android.library')) {
+                try {
+                    def androidExt = project.extensions.findByName('android')
+                    if (androidExt != null) {
+                        androidExt.compileOptions.sourceCompatibility = JavaVersion.VERSION_17
+                        androidExt.compileOptions.targetCompatibility = JavaVersion.VERSION_17
+                    }
+                } catch (ignored) {}
+                // configure Kotlin compile tasks
+                project.tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+                    kotlinOptions.jvmTarget = "17"
+                }
+            }
+        }
+    }
+}
+INIT
+          echo "Installed ~/.gradle/init.gradle (TARGET=$TARGET)"
+
       - name: Ensure Android Java/Kotlin compatibility (dynamic fixes)
         script: |
           set -e
-          # This script detects the Java runtime and patches any android/build.gradle files to set
-          # compileOptions and kotlinOptions to a compatible target (21 if available, otherwise 17).
           if [ -n "$APP_DIR" ] && [ "$APP_DIR" != "." ]; then ROOT_DIR="$APP_DIR"; else ROOT_DIR="."; fi
           echo "Applying Android compatibility fixes under: $ROOT_DIR"
-          cat > /tmp/compat_patch.py <<'PY'
-            import os
-            import re
-            import subprocess
-
-            root_dir = os.environ.get('ROOT_DIR', '.')
-
-            # detect java major version
-            java_version = None
-            try:
-                p = subprocess.run(['java', '-version'], stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-                s = p.stderr + p.stdout
-                m = re.search(r'version \"?([0-9]+)', s)
-                if m:
-                    java_version = int(m.group(1))
-            except Exception as e:
-                print('Warning: could not determine java version:', e)
-
-            # choose target version
-            if java_version and java_version >= 21:
-                target = 21
-            else:
-                target = 17
-
-            java_const = f'VERSION_{target}'
-            print(f'Detected java_version={java_version}, using target={target}')
-
-            # walk and patch gradle files
-            for dirpath, dirnames, filenames in os.walk(root_dir):
-                for fname in filenames:
-                    if fname == 'build.gradle' or fname.endswith('.gradle.kts') or fname == 'build.gradle.kts':
-                        path = os.path.join(dirpath, fname)
-                        try:
-                            txt = open(path, 'r', encoding='utf-8').read()
-                        except Exception:
-                            print('Skipping non-text file', path)
-                            continue
-                        modified = txt
-                        if 'android {' in txt:
-                            # replace existing JavaVersion.VERSION_X or numeric versions
-                            modified = re.sub(r'sourceCompatibility\s+JavaVersion\.VERSION_\d+', 'sourceCompatibility JavaVersion.' + java_const, modified)
-                            modified = re.sub(r'targetCompatibility\s+JavaVersion\.VERSION_\d+', 'targetCompatibility JavaVersion.' + java_const, modified)
-                            modified = re.sub(r'sourceCompatibility\s*=\s*\"?\d+\"?', 'sourceCompatibility JavaVersion.' + java_const, modified)
-                            modified = re.sub(r'targetCompatibility\s*=\s*\"?\d+\"?', 'targetCompatibility JavaVersion.' + java_const, modified)
-                            # kotlin jvmTarget
-                            modified = re.sub(r'jvmTarget\s*=\s*\"?\d+\"?', 'jvmTarget = "' + str(target) + '"', modified)
-                            # if neither compileOptions nor kotlinOptions exist, insert them after android {
-                            if 'compileOptions' not in modified and 'kotlinOptions' not in modified:
-                                insert_block = (
-                                    'android {\n'
-                                    '    compileOptions {\n'
-                                    '        sourceCompatibility JavaVersion.' + java_const + '\n'
-                                    '        targetCompatibility JavaVersion.' + java_const + '\n'
-                                    '    }\n'
-                                    '    kotlinOptions {\n'
-                                    '        jvmTarget = "' + str(target) + '"\n'
-                                    '    }\n'
-                                    )
-                                modified = modified.replace('android {', insert_block, 1)
-                        if modified != txt:
-                            try:
-                                open(path, 'w', encoding='utf-8').write(modified)
-                                print('Patched', path)
-                            except Exception as e:
-                                print('Failed to write patch to', path, e)
-          PY
-          # remove leading indentation added by YAML so python file starts at column 1
-          sed -i '' -e "s/^    //" /tmp/compat_patch.py || sed -i -e "s/^    //" /tmp/compat_patch.py
-          python3 /tmp/compat_patch.py
-          echo "Android compatibility fixes complete. Listing modified gradle files (if any):"
+          find "$ROOT_DIR" -type f \( -name 'build.gradle' -o -name 'build.gradle.kts' -o -name 'settings.gradle' \) -maxdepth 6 -print0 | \
+          while IFS= read -r -d '' file; do
+            echo "Processing $file"
+            cp "$file" "$file.bak" || true
+            perl -0777 -pe "
+              \$target = 17;
+              s/sourceCompatibility\\s+JavaVersion\\.VERSION_\\d+/sourceCompatibility JavaVersion.VERSION_\$target/sg;
+              s/targetCompatibility\\s+JavaVersion\\.VERSION_\\d+/targetCompatibility JavaVersion.VERSION_\$target/sg;
+              s/sourceCompatibility\\s*=\\s*\\'?\\\"?\\d+\\\"?\\'?/sourceCompatibility JavaVersion.VERSION_\$target/sg;
+              s/targetCompatibility\\s*=\\s*\\'?\\\"?\\d+\\\"?\\'?/targetCompatibility JavaVersion.VERSION_\$target/sg;
+              s/jvmTarget\\s*=\\s*\\\"?\\d+\\\"?/jvmTarget = \"\$target\"/sg;
+              if (index(\$_, "android {") != -1 && index(\$_, "compileOptions") == -1 && index(\$_, "kotlinOptions") == -1) {
+                \$_ =~ s/android \{/android {\n    compileOptions {\n        sourceCompatibility JavaVersion.VERSION_\$target\n        targetCompatibility JavaVersion.VERSION_\$target\n    }\n    kotlinOptions {\n        jvmTarget = \"\$target\"\n    }\n/;
+              }
+            " "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+            if ! cmp -s "$file" "$file.bak"; then
+              echo "Patched $file"
+            else
+              echo "No changes needed for $file"
+              rm -f "$file.bak"
+            fi
+          done
+          echo "Android compatibility fixes complete."
           find "$ROOT_DIR" -type f \( -name 'build.gradle' -o -name 'build.gradle.kts' \) -maxdepth 6 -print
 
       - name: Build Debug APK File
